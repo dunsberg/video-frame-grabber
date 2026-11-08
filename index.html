@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<title>视频抽帧工具</title>
+<title>视频抽帧 &amp; 剪辑工具</title>
 <style>
   :root { --bg:#111318; --panel:#1b1f27; --line:#2a303c; --txt:#e8eaf0; --dim:#8b93a3; --acc:#4f8cff; }
   * { box-sizing:border-box; margin:0; padding:0; }
@@ -19,14 +19,16 @@
 
   /* 播放器布局 */
   #player { display:none; flex-direction:column; height:100%; }
-  #stage { flex:1; display:flex; align-items:center; justify-content:center; background:#000; overflow:hidden; position:relative; min-height:0; }
+  #stage { flex:1; display:flex; align-items:center; justify-content:center; background:#000; overflow:hidden; position:relative; min-height:120px; }
   video { max-width:100%; max-height:100%; }
-  #panel { background:var(--panel); border-top:1px solid var(--line); padding:10px 14px; display:flex; flex-direction:column; gap:8px; }
+  #panel { background:var(--panel); border-top:1px solid var(--line); padding:10px 14px; display:flex; flex-direction:column; gap:8px;
+    overflow-y:auto; max-height:62vh; }
 
   .row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
   button { background:#262c37; color:var(--txt); border:1px solid var(--line); border-radius:7px;
     padding:6px 12px; cursor:pointer; font:inherit; }
   button:hover { border-color:var(--acc); color:#fff; }
+  button:disabled { opacity:.45; cursor:wait; }
   button.primary { background:var(--acc); border-color:var(--acc); color:#fff; font-weight:600; }
   button.primary:hover { filter:brightness(1.1); }
   button.wide { min-width:52px; }
@@ -36,6 +38,9 @@
   select { background:#11141a; color:var(--txt); border:1px solid var(--line); border-radius:6px; padding:5px 8px; font:inherit; }
   #tc { font-size:15px; color:#fff; background:#11141a; border:1px solid var(--line); border-radius:6px; padding:5px 10px; font-variant-numeric:tabular-nums; }
   #seek { flex:1; min-width:200px; accent-color:var(--acc); }
+  #selWrap { flex:1; min-width:200px; height:5px; border-radius:3px; background:#11141a; position:relative; }
+  #selWrap .ph { width:90px; flex:none; }
+  #selBar { position:absolute; top:0; bottom:0; background:rgba(79,140,255,.55); border-radius:3px; display:none; }
   #fileName { max-width:46ch; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .keys { color:var(--dim); font-size:12px; }
   .toast { position:fixed; left:50%; bottom:90px; transform:translateX(-50%); background:#262c37; border:1px solid var(--acc);
@@ -48,7 +53,7 @@
 <div id="dropzone">
   <div class="icon">🎬</div>
   <div><b>拖入视频文件</b>，或点击选择（mp4 / webm / mov…）</div>
-  <div class="hint">全程本地解码，不联网、不上传</div>
+  <div class="hint">播放与抽帧全程本地解码；首次剪辑需联网加载引擎（约 30MB，之后有缓存）</div>
 </div>
 <input type="file" id="fileInput" accept="video/*" hidden>
 
@@ -58,6 +63,10 @@
     <div class="row">
       <input type="range" id="seek" min="0" max="1000" value="0">
       <span id="tc">00:00.000</span>
+    </div>
+    <div class="row" style="margin-top:-6px">
+      <div id="selWrap"><div id="selBar"></div></div>
+      <div class="ph"></div>
     </div>
     <div class="row">
       <button id="btnM10" class="wide" title="后退10帧">⏪10</button>
@@ -75,10 +84,20 @@
       <button id="btnCopy">复制到剪贴板</button>
       <button id="btnSave" class="primary">📷 导出 PNG（原分辨率）</button>
     </div>
+    <div class="row" style="border-top:1px dashed var(--line); padding-top:8px">
+      <span class="info">✂️ 片段</span>
+      <button id="btnIn" title="把当前画面设为片段起点（快捷键 I）">「 设起点</button>
+      <button id="btnOut" title="把当前画面设为片段终点（快捷键 O）">设终点 」</button>
+      <button id="btnClr">↺ 清除</button>
+      <span class="info" id="selInfo">未选择</span>
+      <span style="flex:1"></span>
+      <span class="info" id="clipStatus"></span>
+      <button id="btnClip" class="primary">✂️ 输出片段（无损复制）</button>
+    </div>
     <div class="row">
       <span class="info" id="fileName"></span>
       <span style="flex:1"></span>
-      <span class="keys">空格=播放/暂停　←/→=±1帧　Shift+←/→=±10帧　,/.=±1帧</span>
+      <span class="keys">空格=播放/暂停　←/→=±1帧　Shift+←/→=±10帧　I/O=设起点/终点</span>
     </div>
   </div>
 </div>
@@ -87,7 +106,7 @@
 <script>
 const $ = id => document.getElementById(id);
 const video = $('video'), dropzone = $('dropzone'), fileInput = $('fileInput');
-let objUrl = null, fileNameBase = 'frame';
+let objUrl = null, fileNameBase = 'frame', curFile = null;
 
 /* ---------- 载入文件 ---------- */
 function loadFile(file) {
@@ -96,11 +115,13 @@ function loadFile(file) {
   }
   if (objUrl) URL.revokeObjectURL(objUrl);
   objUrl = URL.createObjectURL(file);
+  curFile = file;
   fileNameBase = file.name.replace(/\.[^.]+$/, '');
   video.src = objUrl;
   dropzone.style.display = 'none';
   $('player').style.display = 'flex';
   $('fileName').textContent = '📄 ' + file.name;
+  clearSel();
   video.addEventListener('loadedmetadata', () => {
     $('meta').innerHTML = `<b>${video.videoWidth}×${video.videoHeight}</b> · ${fmt(video.duration).slice(0,8)}`;
   }, { once: true });
@@ -144,12 +165,14 @@ $('btnNew').onclick = () => { video.pause(); video.removeAttribute('src'); video
 
 document.addEventListener('keydown', e => {
   if ($('player').style.display === 'none') return;
-  const k = e.key;
-  if (k === ' ') { e.preventDefault(); $('btnPlay').onclick(); }
-  else if (k === 'ArrowLeft')  { e.preventDefault(); step(e.shiftKey ? -10 : -1); }
-  else if (k === 'ArrowRight') { e.preventDefault(); step(e.shiftKey ? +10 : +1); }
-  else if (k === ',') step(-1);
-  else if (k === '.') step(+1);
+  const k = e.key.toLowerCase();
+  if (e.key === ' ') { e.preventDefault(); $('btnPlay').onclick(); }
+  else if (e.key === 'ArrowLeft')  { e.preventDefault(); step(e.shiftKey ? -10 : -1); }
+  else if (e.key === 'ArrowRight') { e.preventDefault(); step(e.shiftKey ? +10 : +1); }
+  else if (e.key === ',') step(-1);
+  else if (e.key === '.') step(+1);
+  else if (k === 'i') setIn();
+  else if (k === 'o') setOut();
 });
 
 /* 自动探测 FPS：播放瞬间取相邻帧 mediaTime 差值的中位数 */
@@ -183,22 +206,19 @@ function probeFPS() {
 }
 video.addEventListener('loadedmetadata', () => setTimeout(probeFPS, 50), { once: true });
 
-/* ---------- 导出 ---------- */
+/* ---------- PNG 导出 ---------- */
 function drawCanvas() {
   const c = document.createElement('canvas');
   c.width = video.videoWidth; c.height = video.videoHeight;   // 原始分辨率，与窗口显示大小无关
   c.getContext('2d').drawImage(video, 0, 0);
   return c;
 }
-function outName() {
-  return `${fileNameBase}_${fmt(video.currentTime).replace(/[:.]/g,'-')}_f${frameNo()}.png`;
-}
 $('btnSave').onclick = () => {
   if (!video.videoWidth) return;
   drawCanvas().toBlob(blob => {
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = outName();
+    a.download = `${fileNameBase}_${fmt(video.currentTime).replace(/[:.]/g,'-')}_f${frameNo()}.png`;
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 5000);
     toast(`✅ 已导出 ${video.videoWidth}×${video.videoHeight} PNG`);
@@ -213,9 +233,110 @@ $('btnCopy').onclick = async () => {
   } catch { toast('⚠ 复制失败，请直接用导出按钮'); }
 };
 
+/* ---------- 片段选择 ---------- */
+let selIn = null, selOut = null;
+function setIn()  { if (!curFile) return; selIn  = video.currentTime; if (selOut !== null && selOut <= selIn)  selOut = null; updateSel(); }
+function setOut() { if (!curFile) return; selOut = video.currentTime; if (selIn  !== null && selOut <= selIn)  selIn  = null; updateSel(); }
+function clearSel(){ selIn = selOut = null; updateSel(); }
+function updateSel() {
+  const has = selIn !== null && selOut !== null;
+  $('selInfo').innerHTML = has
+    ? `<b>${fmt(selIn)} → ${fmt(selOut)}</b> · ${(selOut - selIn).toFixed(3)}s`
+    : (selIn !== null ? `起点 ${fmt(selIn)}，再定位到终点按 O`
+       : selOut !== null ? `终点 ${fmt(selOut)}，再回到起点按 I`
+       : '未选择（定位画面后按 I / O）');
+  const bar = $('selBar');
+  if (video.duration && has) {
+    bar.style.display = 'block';
+    bar.style.left  = (selIn / video.duration * 100) + '%';
+    bar.style.width = ((selOut - selIn) / video.duration * 100) + '%';
+  } else bar.style.display = 'none';
+  $('btnClip').disabled = !has || busy;
+}
+$('btnIn').onclick = setIn;
+$('btnOut').onclick = setOut;
+$('btnClr').onclick = clearSel;
+
+/* ---------- ffmpeg.wasm 无损剪辑 ---------- */
+const CDN = {
+  main:   'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.js',
+  worker: 'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/umd/814.ffmpeg.js',
+  // 注意：必须用 ESM 版 core。0.12.10 传入 classWorkerURL 时 worker 以 module 模式创建，
+  // importScripts 被禁止，worker 会退回 import() 动态导入——只有 ESM 构建才有 default 导出。
+  core:   'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/esm/ffmpeg-core.js',
+  wasm:   'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/esm/ffmpeg-core.wasm',
+};
+let ff = null, ffP = null, busy = false;
+function setStatus(t) { $('clipStatus').textContent = t; }
+function toBlobURL(url, type) {
+  return fetch(url).then(r => r.blob()).then(b => URL.createObjectURL(new Blob([b], { type })));
+}
+function loadScript(src) {
+  return new Promise((ok, err) => {
+    const s = document.createElement('script');
+    s.src = src; s.onload = ok; s.onerror = () => err(new Error('引擎脚本下载失败'));
+    document.head.appendChild(s);
+  });
+}
+async function getFF() {
+  if (ff) return ff;
+  if (!ffP) {
+    ffP = (async () => {
+      setStatus('加载剪辑引擎（首次约 30MB）…');
+      await loadScript(CDN.main);
+      const f = new FFmpegWASM.FFmpeg();
+      await f.load({
+        coreURL: await toBlobURL(CDN.core, 'text/javascript'),
+        wasmURL: CDN.wasm,
+        classWorkerURL: await toBlobURL(CDN.worker, 'text/javascript'),
+      });
+      f.on('progress', ({ progress }) => {
+        if (busy) setStatus(`剪辑中… ${Math.min(99, Math.max(0, Math.round(progress * 100)))}%`);
+      });
+      return f;
+    })().catch(e => { ffP = null; throw e; });
+  }
+  return ffP;
+}
+async function exportClip() {
+  if (selIn === null || selOut === null || selOut <= selIn) { toast('⚠ 请先设置起点和终点'); return; }
+  if (busy) return;
+  busy = true; $('btnClip').disabled = true; $('btnClip').textContent = '剪辑中…';
+  try {
+    const f = await getFF();
+    setStatus('读取视频到内存…');
+    const ext = (curFile.name.match(/\.([a-z0-9]+)$/i) || [,'mp4'])[1].toLowerCase();
+    const inName = 'input.' + ext;
+    await f.writeFile(inName, new Uint8Array(await curFile.arrayBuffer()));
+    const outName = 'clip.' + (ext === 'webm' ? 'webm' : 'mp4');
+    setStatus('剪辑中…（无损流复制）');
+    await f.exec(['-ss', selIn.toFixed(3), '-to', selOut.toFixed(3), '-i', inName,
+                  '-c', 'copy', '-avoid_negative_ts', 'make_zero', '-y', outName]);
+    const data = await f.readFile(outName);
+    if (!data || !data.length) throw new Error('输出为空，请换个时间点重试');
+    const outExt = outName.split('.').pop();
+    const blob = new Blob([data.buffer], { type: outExt === 'webm' ? 'video/webm' : 'video/mp4' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `${fileNameBase}_${fmt(selIn).replace(/[:.]/g,'-')}-${fmt(selOut).replace(/[:.]/g,'-')}.${outExt}`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 8000);
+    setStatus(`✅ 已导出 ${(selOut - selIn).toFixed(1)}s 片段`);
+    toast(`✅ 片段已导出（${(blob.size / 1048576).toFixed(1)} MB）`);
+    await f.deleteFile(inName); await f.deleteFile(outName);
+  } catch (e) {
+    console.error(e); setStatus('');
+    toast('⚠ 剪辑失败：' + (e.message || '未知错误'));
+  } finally {
+    busy = false; $('btnClip').disabled = false;
+    $('btnClip').textContent = '✂️ 输出片段（无损复制）'; updateSel();
+  }
+}
+$('btnClip').onclick = exportClip;
+
 function toast(msg) {
   const t = $('toast'); t.textContent = msg; t.classList.add('show');
-  clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('show'), 2200);
+  clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('show'), 2600);
 }
 </script>
 </body>
